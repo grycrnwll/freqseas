@@ -138,6 +138,27 @@ seas_ssi.seas_test <- function(object, phase_rule, donor_quantile = 0.9, ...) {
                           donor_pool = donor_pool, n = n_e)
     Ghat_full  <- gn$Ghat_full
     donor_level <- gn$donor_level
+
+    # Nyquist gain. fs_gain() leaves omega = pi at gain 1: its `pgram_pos`
+    # (length Jmax = (n_e - 1) %/% 2) has no entry for the Nyquist ordinate, so
+    # it has no periodogram-based estimate to work from. That was harmless while
+    # the residual grid was unaligned -- omega = pi was then generically OFF the
+    # grid and its mass sat on ordinates that J1 did cover. Now that fs_whiten()
+    # aligns n_e to a whole number of seasonal cycles, an even seasonal period N
+    # forces n_e even, so omega = pi lands exactly on the Nyquist ordinate and is
+    # an exact seasonal harmonic -- and the band branch would leave the entire
+    # seasonal comb tooth at pi untouched. Fill it from the raw periodogram, by
+    # the same "power relative to the donor level, floored at 1" rule fs_gain()
+    # applies to every other seasonal ordinate. Guarded on membership in H, so
+    # an odd N (where pi is not a seasonal harmonic) is left alone.
+    if (n_e %% 2L == 0L) {
+      nyq_j <- n_e %/% 2L                       # positive-side index of omega = pi
+      if (nyq_j %in% object$partition$H) {
+        I_nyq <- object$pgram$pgram_raw[nyq_j + 1L]
+        Ghat_full[nyq_j + 1L] <- sqrt(max(I_nyq / donor_level, 1))
+      }
+    }
+
     theta_full <- if (phase_rule == "minimum") {
       min_phase(log(Ghat_full))
     } else {
@@ -151,11 +172,24 @@ seas_ssi.seas_test <- function(object, phase_rule, donor_quantile = 0.9, ...) {
   } else {
     # line branch: null the exact-harmonic ordinates to the donor level.
     H_full <- grid$pos_idx[object$partition$H]
-    if (length(H_full) == 0L) {
-      # decision = seasonal but no on-grid exact harmonic to null: nothing to
-      # remove under the line specification. Return unchanged, loudly.
-      message("seas_ssi: line specification but no on-grid exact-harmonic ",
-              "ordinate was identified; returning the input UNCHANGED.")
+    # The line branch removes the seasonal comb by nulling its exact harmonics,
+    # so it is only meaningful when EVERY seasonal harmonic is representable on
+    # the residual Fourier grid. A partial set is not a weaker adjustment, it is
+    # the wrong one: the harmonics that are off-grid leak across the spectrum and
+    # nulling the few on-grid ones leaves that leakage untouched while reporting
+    # spec = "line" as though it had worked. Note that testing emptiness is not
+    # enough -- Nyquist is on-grid whenever n_e is even, so the incomplete case
+    # generically presents as |H| = 1, not |H| = 0. fs_whiten() now aligns the
+    # residual grid to a whole number of seasonal cycles, which makes all of them
+    # representable; this guard is the honest report if that ever fails to hold.
+    n_h_expected <- length(omega_seasonal(object$P, object$N,
+                                          exclude_nyquist = FALSE))
+    if (length(H_full) < n_h_expected) {
+      message("seas_ssi: line specification but only ", length(H_full), " of ",
+              n_h_expected, " seasonal harmonics are representable on the ",
+              sprintf("length-%d residual Fourier grid", n_e),
+              " (the grid is not a whole number of seasonal cycles); ",
+              "returning the input UNCHANGED.")
       adjusted <- .reclothe(x_num, object)
       seasonal <- .reclothe(rep(0, length(x_num)), object)
       obj <- new_seas_sa(

@@ -16,8 +16,19 @@
   sprintf("%.2f", R)
 }
 
+# The whitener line, with the seasonal-alignment trim appended only when the
+# residual grid actually had to be shortened (n_trim > 0). The trim is a real,
+# bounded edge effect: the leading n_trim + d + p observations of an adjusted
+# series come back unadjusted, so it is reported rather than left implicit.
 .whitener_line <- function(wh) {
-  sprintf("whitener: d = %d, AR(%d) on M0 ordinates", wh$d, wh$p)
+  base <- sprintf("whitener: d = %d, AR(%d) on M0 ordinates", wh$d, wh$p)
+  n_trim <- if (is.null(wh$n_trim)) 0L else wh$n_trim
+  if (n_trim > 0L) {
+    base <- sprintf("%s | seasonal alignment trimmed %d leading residual%s (first %d obs. unadjusted)",
+                    base, n_trim, if (n_trim == 1L) "" else "s",
+                    n_trim + wh$d + wh$p)
+  }
+  base
 }
 
 .M_line <- function(obj) {

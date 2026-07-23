@@ -63,10 +63,19 @@ de-biased-Whittle process-variance scale times
 \eqn{\prod_k (1 - \kappa_k^2)}, Levinson-Durbin).}
 \item{bic_path}{Named numeric vector of de-biased-Whittle BIC values, one per candidate
 order \code{0..ar_max} (names \code{"0".."ar_max"}).}
-\item{e}{Numeric vector of conditional AR residuals (the whitened series),
-length \code{n_e}.}
-\item{n_e}{Integer length of \code{e}, equal to
-\code{length(y0) - p}.}
+\item{e}{Numeric vector of conditional AR residuals (the whitened series)
+on the seasonally aligned grid, length \code{n_e}.}
+\item{n_e}{Integer length of \code{e}: the largest multiple of \code{N}
+not exceeding \code{length(y0) - p}. Aligning the residual grid to a
+whole number of seasonal cycles is what makes the exact seasonal
+harmonics \code{2 * pi * h / N} Fourier ordinates of the grid every
+downstream stage works on.}
+\item{e_head}{The \code{n_trim} leading conditional residuals held out of
+the aligned grid (\code{numeric(0)} when the grid was already aligned).
+\code{fs_recolor()} splices these back, so the round trip stays exact.}
+\item{n_trim}{Integer number of leading residuals trimmed, in
+\code{0:(N - 1)}. The first \code{n_trim + d + p} observations of an
+adjusted series are therefore left unadjusted.}
 \item{anchors}{The first \code{d + p} values of \code{x} (level anchors
 that \code{fs_recolor()} reproduces exactly).}
 \item{N, P, M}{The seasonal period, multiplier, and bin count, echoed for
@@ -87,6 +96,15 @@ blindness (an AR(2) with negative lag-2 coefficient peaks at pi/2), whereas
 restricting the likelihood's ordinate set is.
 }
 \details{
+The returned residual vector is trimmed from the front to a whole number of
+seasonal cycles, so \code{n_e} is a multiple of \code{N} rather than
+\code{length(x) - d - p}. Every downstream stage works on the Fourier grid of
+that vector, and the exact seasonal harmonics are ordinates of that grid only
+under this alignment. The trimmed head is returned in \code{e_head} and
+spliced back by \code{fs_recolor()}, so the round trip stays exact; the cost
+is that the leading \code{n_trim + d + p} observations of an adjusted series
+are left unadjusted.
+
 The whitener's blindness to seasonality comes from the ordinate set its
 de-biased Whittle likelihood evaluates on, not from any order restriction.
 The two exclusion geometries trade off in opposite directions. The default

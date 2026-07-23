@@ -35,7 +35,9 @@
 #'   fields `decision`, `p`, `alpha`, `evt` (`statistic`, `p`, `critical`,
 #'   `N1`, `N0`), `spec` (`label`, `shoulder_p`, `phase_R`, `note`), `N`,
 #'   `P`, `M`, `M_selection`, `whitener` (`d`, `d_reason`, `p`, `ar`,
-#'   `bic_path`, `sigma2`), `harmonic_table` (`NULL` if not present on
+#'   `bic_path`, `sigma2`, `n_trim` = leading residuals dropped to align the
+#'   residual grid to a whole number of seasonal cycles),
+#'   `harmonic_table` (`NULL` if not present on
 #'   `object`), `donor_pool_size`, `n_e`, and `call`.
 #'
 #' @examples
@@ -68,7 +70,8 @@ summary.seas_test <- function(object, ...) {
       p        = wh$p,
       ar       = wh$ar,
       bic_path = wh$bic_path,
-      sigma2   = wh$sigma2
+      sigma2   = wh$sigma2,
+      n_trim   = if (is.null(wh$n_trim)) 0L else wh$n_trim
     ),
     harmonic_table  = object$spec$harmonic_table,
     donor_pool_size = length(object$donor_pool),
@@ -121,6 +124,11 @@ print.summary.seas_test <- function(x, ...) {
   if (x$whitener$p > 0L) {
     cat(sprintf("  AR coefficients: %s\n",
                 paste(format(x$whitener$ar, digits = 3), collapse = ", ")))
+  }
+  if (isTRUE(x$whitener$n_trim > 0L)) {
+    cat(sprintf("  seasonal alignment: trimmed %d leading residual%s (first %d observations unadjusted)\n",
+                x$whitener$n_trim, if (x$whitener$n_trim == 1L) "" else "s",
+                x$whitener$n_trim + x$whitener$d + x$whitener$p))
   }
   bp <- x$whitener$bic_path
   if (!is.null(bp)) {

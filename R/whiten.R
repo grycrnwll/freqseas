@@ -191,6 +191,15 @@
 #' blindness (an AR(2) with negative lag-2 coefficient peaks at pi/2), whereas
 #' restricting the likelihood's ordinate set is.
 #'
+#' The returned residual vector is trimmed from the front to a whole number of
+#' seasonal cycles, so \code{n_e} is a multiple of \code{N} rather than
+#' \code{length(x) - d - p}. Every downstream stage works on the Fourier grid of
+#' that vector, and the exact seasonal harmonics are ordinates of that grid only
+#' under this alignment. The trimmed head is returned in \code{e_head} and
+#' spliced back by \code{fs_recolor()}, so the round trip stays exact; the cost
+#' is that the leading \code{n_trim + d + p} observations of an adjusted series
+#' are left unadjusted.
+#'
 #' @param x Numeric vector, already extracted from any \code{ts}/\code{tsibble}
 #'   upstream. Must be finite, non-constant, and of length at least \code{3 * N}.
 #' @param N Positive integer seasonal period (observations per year, e.g. 4 for
@@ -257,10 +266,19 @@
 #'       \eqn{\prod_k (1 - \kappa_k^2)}, Levinson-Durbin).}
 #'     \item{bic_path}{Named numeric vector of de-biased-Whittle BIC values, one per candidate
 #'       order \code{0..ar_max} (names \code{"0".."ar_max"}).}
-#'     \item{e}{Numeric vector of conditional AR residuals (the whitened series),
-#'       length \code{n_e}.}
-#'     \item{n_e}{Integer length of \code{e}, equal to
-#'       \code{length(y0) - p}.}
+#'     \item{e}{Numeric vector of conditional AR residuals (the whitened series)
+#'       on the seasonally aligned grid, length \code{n_e}.}
+#'     \item{n_e}{Integer length of \code{e}: the largest multiple of \code{N}
+#'       not exceeding \code{length(y0) - p}. Aligning the residual grid to a
+#'       whole number of seasonal cycles is what makes the exact seasonal
+#'       harmonics \code{2 * pi * h / N} Fourier ordinates of the grid every
+#'       downstream stage works on.}
+#'     \item{e_head}{The \code{n_trim} leading conditional residuals held out of
+#'       the aligned grid (\code{numeric(0)} when the grid was already aligned).
+#'       \code{fs_recolor()} splices these back, so the round trip stays exact.}
+#'     \item{n_trim}{Integer number of leading residuals trimmed, in
+#'       \code{0:(N - 1)}. The first \code{n_trim + d + p} observations of an
+#'       adjusted series are therefore left unadjusted.}
 #'     \item{anchors}{The first \code{d + p} values of \code{x} (level anchors
 #'       that \code{fs_recolor()} reproduces exactly).}
 #'     \item{N, P, M}{The seasonal period, multiplier, and bin count, echoed for
@@ -385,8 +403,36 @@ fs_whiten <- function(x, N, P = 1L, M, d = c("auto", "none", "first"),
   phi   <- best$phi
 
   # --- conditional residuals (time domain, no circular whitening) -------
-  e   <- .fs_ar_residuals(y0, phi)
-  n_e <- length(e)
+  e <- .fs_ar_residuals(y0, phi)
+
+  # --- seasonal alignment of the residual (surgery) grid ----------------
+  # Everything downstream -- fourier_grid(), mbin_partition(), index_sets(),
+  # the periodogram and fs_surgery() -- lives on the length-n_e Fourier grid,
+  # and the exact seasonal harmonics 2*pi*h/N are Fourier ordinates of that
+  # grid only when N divides n_e. Differencing and the AR fit consume d + p
+  # observations, so an unaligned grid was the generic case: the exact-harmonic
+  # set H collapsed to at most {Nyquist}, a deterministic seasonal line leaked
+  # across the spectrum (spuriously rejecting the shoulder test and so being
+  # misclassified as a band), and bin-local gain surgery could not remove the
+  # leaked line. Trimming to a whole number of seasonal cycles restores the
+  # geometry the rest of the pipeline assumes. The trim is taken from the FRONT:
+  # the recent end of the series is the end that matters for seasonal
+  # adjustment, so the held-out head is the oldest (< N) residuals. They are
+  # returned in `e_head` and spliced back by fs_recolor(), which keeps the round
+  # trip exact -- the cost is that the first n_trim + d + p observations of an
+  # adjusted series are left unadjusted.
+  n_full <- length(e)
+  n_use  <- N * (n_full %/% N)      # largest whole number of seasonal cycles
+  n_trim <- n_full - n_use          # leading residuals held out of the grid (< N)
+  if (n_use < 2L * N) {
+    stop(sprintf(
+      paste0("Series too short once the residual grid is seasonally aligned: ",
+             "%d residuals (length(x) = %d, d = %d, AR order p = %d) trim to ",
+             "%d, below the required 2 * N = %d. Supply a longer series."),
+      n_full, length(x), d, p_sel, n_use, 2L * N), call. = FALSE)
+  }
+  e_head <- e[seq_len(n_trim)]      # untouched head, spliced back by fs_recolor()
+  e      <- e[(n_trim + 1L):n_full]
 
   list(
     d        = d,
@@ -397,7 +443,9 @@ fs_whiten <- function(x, N, P = 1L, M, d = c("auto", "none", "first"),
     sigma2   = best$sigma2,
     bic_path = bic_path,
     e         = e,
-    n_e       = n_e,
+    n_e       = n_use,
+    e_head    = e_head,
+    n_trim    = n_trim,
     anchors   = x[seq_len(d + p_sel)],
     N         = N,
     P         = P,
@@ -421,18 +469,34 @@ fs_whiten <- function(x, N, P = 1L, M, d = c("auto", "none", "first"),
 #' \code{estar} is the stored \code{wh$e}, the round trip reproduces \code{x}
 #' to numerical precision.
 #'
-#' @param estar Numeric vector of (adjusted) innovations, length
-#'   \code{wh$n_e = length(y0) - wh$p}, aligned to residual times
-#'   \code{(p+1)..length(y0)}.
+#' In practice the leading run of unchanged values is longer than the \code{d + p}
+#' anchors: the \code{wh$n_trim} residuals that \code{fs_whiten()} held out to
+#' align the grid to a whole number of seasonal cycles are spliced back
+#' unmodified from \code{wh$e_head}, so the first \code{wh$n_trim + d + p} values
+#' of the reconstruction equal those of \code{x} whatever \code{estar} contains.
+#' The guaranteed anchor convention is still \code{d + p}; the extra
+#' \code{wh$n_trim} values are unchanged because that head is never surgered.
+#'
+#' @param estar Numeric vector of (adjusted) innovations on the seasonally
+#'   aligned residual grid, length \code{wh$n_e}, aligned to residual times
+#'   \code{(p + wh$n_trim + 1)..length(y0)}. The \code{wh$n_trim} leading
+#'   residuals that \code{fs_whiten()} held out of that grid are taken
+#'   unchanged from \code{wh$e_head} and prepended here, so the AR recursion
+#'   still runs over all \code{length(y0) - p} innovations.
 #' @param wh The list returned by \code{fs_whiten()} (supplies \code{d},
 #'   \code{mu}, \code{p}, \code{ar}).
 #' @param x The original numeric input to \code{fs_whiten()}; supplies the
 #'   demeaned initial values and the level anchor \code{x[1]} for
 #'   de-differencing.
 #'
-#' @return A numeric vector the same length as \code{x} whose first
-#'   \code{d + p} values equal those of \code{x} (the documented anchor
-#'   convention).
+#' @return A numeric vector the same length as \code{x}. Its first
+#'   \code{d + p} values equal those of \code{x} — the guaranteed anchor
+#'   convention, which holds for any \code{estar}. Because the
+#'   \code{wh$n_trim} leading residuals held out of the seasonally aligned
+#'   grid are spliced back unmodified, the first \code{wh$n_trim + d + p}
+#'   values in fact equal those of \code{x} as well; that longer run is a
+#'   consequence of the trim (the head is never surgered), not part of the
+#'   anchor guarantee.
 #'
 #' @keywords internal
 fs_recolor <- function(estar, wh, x) {
@@ -447,10 +511,21 @@ fs_recolor <- function(estar, wh, x) {
   y0  <- y - mu
   n_y <- length(y0)
 
-  if (length(estar) != n_y - p) {
-    stop(sprintf("`estar` has length %d but %d innovations are expected.",
-                 length(estar), n_y - p), call. = FALSE)
+  # `estar` lives on the seasonally aligned residual grid; the leading residuals
+  # fs_whiten() trimmed to reach that alignment are spliced back unchanged so
+  # the recursion below sees all n_y - p innovations in their original order.
+  # `e_head` is NULL on hand-built/legacy whitener records: treat as length 0.
+  e_head <- if (is.null(wh$e_head)) numeric(0) else as.numeric(wh$e_head)
+  n_e    <- if (is.null(wh$n_e)) n_y - p - length(e_head) else wh$n_e
+
+  if (length(estar) != n_e) {
+    stop(sprintf(
+      paste0("`estar` has length %d but %d innovations are expected on the ",
+             "seasonally aligned residual grid (%d leading residual(s) were ",
+             "trimmed and are supplied by `wh$e_head`)."),
+      length(estar), n_e, length(e_head)), call. = FALSE)
   }
+  estar <- c(e_head, estar)
 
   ystar <- numeric(n_y)
   if (p > 0L) ystar[seq_len(p)] <- y0[seq_len(p)]

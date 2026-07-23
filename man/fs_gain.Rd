@@ -26,9 +26,10 @@ Named list:
 \item{Ghat_full}{Numeric vector, length \code{n}: linear-scale gain on
 the full DFT circle, Hermitian-symmetric
 (\code{Ghat_full[j] == Ghat_full[n - j]}), DC = 1, Nyquist (if
-\code{n} is even) = 1 (the Nyquist ordinate is excluded from the
-J1-based estimate by construction -- see Details), ready to divide
-directly into a DFT.}
+\code{n} is even) = 1 (the Nyquist ordinate is outside \code{pgram_pos}
+so it gets the neutral value here; when it is a seasonal harmonic the
+caller must fill it in -- see Details), ready to divide directly into a
+DFT.}
 \item{Ghat_pos}{Numeric vector, length \code{Jmax}: linear-scale gain
 on the positive-frequency axis only (the source for the positive
 half of \code{Ghat_full}).}
@@ -55,10 +56,19 @@ bin edge); ordinates more than one step outside J1 are left at log-gain
 0 (gain 1, i.e. untouched).
 }
 \details{
-Nyquist is never a member of \code{sets$J1} in the intended pipeline
-(\code{omega_seasonal()} excludes it by default), and \code{pgram_pos}
-(length \code{Jmax = (n - 1) \%/\% 2}) never includes it either, so there
-is no periodogram-based estimate available for it; \code{Ghat_full}
-assigns it the neutral (donor-level, gain 1) value, consistent with the
-"1 for all other j" rule applied to every ordinate outside J1.
+\code{pgram_pos} has length \code{Jmax = (n - 1) \%/\% 2}, which for even
+\code{n} excludes the Nyquist ordinate, so no periodogram-based gain
+estimate is available for it here; \code{Ghat_full} assigns it the neutral
+(donor-level, gain 1) value, consistent with the "1 for all other j" rule
+applied to every ordinate outside J1.
+
+Note that \code{omega = pi} \emph{is} a seasonal harmonic in the freqseas
+pipeline whenever the seasonal period \code{N} is even: the partition
+machinery is called with \code{exclude_nyquist = FALSE} throughout, and
+\code{fs_whiten()} aligns the residual length to a multiple of \code{N}, so
+for even \code{N} the Nyquist ordinate always exists and always carries a
+comb tooth. The neutral value returned here is therefore \emph{not} the
+right gain for that ordinate. \code{seas_ssi()}'s band branch fills it in
+from the raw periodogram after calling this function; a caller using
+\code{fs_gain()} directly must do the same.
 }

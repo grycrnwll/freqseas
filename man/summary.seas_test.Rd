@@ -16,7 +16,9 @@ An object of class \code{"summary.seas_test"}, invisibly: a list with
 fields \code{decision}, \code{p}, \code{alpha}, \code{evt} (\code{statistic}, \code{p}, \code{critical},
 \code{N1}, \code{N0}), \code{spec} (\code{label}, \code{shoulder_p}, \code{phase_R}, \code{note}), \code{N},
 \code{P}, \code{M}, \code{M_selection}, \code{whitener} (\code{d}, \code{d_reason}, \code{p}, \code{ar},
-\code{bic_path}, \code{sigma2}), \code{harmonic_table} (\code{NULL} if not present on
+\code{bic_path}, \code{sigma2}, \code{n_trim} = leading residuals dropped to align the
+residual grid to a whole number of seasonal cycles),
+\code{harmonic_table} (\code{NULL} if not present on
 \code{object}), \code{donor_pool_size}, \code{n_e}, and \code{call}.
 }
 \description{

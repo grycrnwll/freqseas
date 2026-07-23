@@ -181,33 +181,50 @@ tst_default <- seas_test(x)
 tst_default$spec[c("label", "shoulder_p", "phase_R")]
 ```
 
-This is worth slowing down on, because the *default* call above specifies
-this genuinely-deterministic series as `"band"`, not `"line"` -- and the
-reason is instructive. The line/band shoulder test needs the exact seasonal
-frequencies to land exactly on Fourier grid ordinates of the *whitened*
-series (length `n_e`), not the original series. Here the M0-Whittle whitener
-selects an AR(1) term, which consumes one observation: `n_e = 119`, no
-longer a multiple of the seasonal period (4). The pattern's power, no longer
-sitting exactly on a grid ordinate, leaks into neighboring ordinates -- which
-the shoulder test correctly (if misleadingly) reads as band-like elevation.
-This is precisely the grid-alignment caveat from the design notes: the
-shoulder test requires the seasonal period to divide the *analyzed* length,
-or a taper. Forcing no differencing and no AR term keeps `n_e` at the
-original, grid-aligned 120:
+That the label comes back `"line"` is worth slowing down on, because the
+thing standing behind it is a piece of grid bookkeeping that is easy to get
+wrong. The shoulder test compares each exact seasonal harmonic against its
+immediate neighbours, which means something only if those harmonics are
+Fourier ordinates of the series actually analyzed -- the *whitened* residual
+series of length `n_e`, not the original series of length `n`. Differencing
+and an AR fit consume observations, so nothing about `n` being a multiple of
+the seasonal period carries over to `n_e`. A deterministic line sitting
+between ordinates leaks across the whole spectrum, the shoulders come up,
+and the shoulder test reads band -- a fixed pattern misread as a stochastic
+one.
 
-```{r line-corrected}
-tst_fixed <- seas_test(x, ar_max = 0, d = "none")
-tst_fixed$spec[c("label", "shoulder_p", "phase_R")]
+`fs_whiten()` closes that gap by construction: it trims the residual vector
+to a whole number of seasonal cycles before anything downstream sees it, so
+`N` divides `n_e` always and the seasonal harmonics are always exact
+ordinates. Here the whitener takes no difference and an AR(1) term, leaving
+119 residuals, of which the last $116 = 29 \times 4$ are kept:
+
+```{r line-trim}
+tst_default$whitener[c("d", "p", "n_e", "n_trim")]
 ```
 
-With grid alignment restored, the specification test correctly reads
-`"line"`: the shoulder ordinates sit at donor level (p far above `alpha`),
-and the block-phase resultant is close to 1 (a frozen pattern, not a
-re-randomizing one) in both runs above -- block-phase is a *descriptive*
-corroborator and isn't grid-sensitive the way the shoulder test is. In
-practice, if you suspect deterministic seasonality and the default call
-specifies `"band"`, check whether `N` divides `n_e` (printed in
-`summary()`'s whitener section) before trusting the label.
+The cost is real, and bounded by `N - 1`. The trimmed residuals are spliced
+back unmodified during recoloring, so the first `n_trim + d + p`
+observations of an *adjusted* series are returned exactly as supplied --
+four of 120 here. On monthly data that can be a full year;
+`log(AirPassengers)` differences once and fits an AR(1), leaving 142
+residuals to be trimmed to 132:
+
+```{r trim-cost}
+seas_test(log(AirPassengers))$whitener[c("d", "p", "n_e", "n_trim")]
+```
+
+so its first 12 observations -- 8% of the sample -- come back unadjusted.
+That is not silent: `summary()` reports the trim in its whitener section
+whenever it is nonzero. The trim is taken from the front deliberately. The
+recent end of a series is the end that matters for seasonal adjustment, so
+the edge effect is pushed onto the oldest observations, which is the
+cheapest place to put it.
+
+The block-phase resultant printed above is a separate, *descriptive*
+corroborator rather than part of the shoulder test: `phase_R` close to 1
+says the pattern is frozen rather than re-randomizing, and unlike the
+shoulder test it never depended on the grid at all.
 
 ## The comb diagnostic
 

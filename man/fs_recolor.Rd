@@ -7,9 +7,12 @@
 fs_recolor(estar, wh, x)
 }
 \arguments{
-\item{estar}{Numeric vector of (adjusted) innovations, length
-\code{wh$n_e = length(y0) - wh$p}, aligned to residual times
-\code{(p+1)..length(y0)}.}
+\item{estar}{Numeric vector of (adjusted) innovations on the seasonally
+aligned residual grid, length \code{wh$n_e}, aligned to residual times
+\code{(p + wh$n_trim + 1)..length(y0)}. The \code{wh$n_trim} leading
+residuals that \code{fs_whiten()} held out of that grid are taken
+unchanged from \code{wh$e_head} and prepended here, so the AR recursion
+still runs over all \code{length(y0) - p} innovations.}
 
 \item{wh}{The list returned by \code{fs_whiten()} (supplies \code{d},
 \code{mu}, \code{p}, \code{ar}).}
@@ -19,9 +22,14 @@ demeaned initial values and the level anchor \code{x[1]} for
 de-differencing.}
 }
 \value{
-A numeric vector the same length as \code{x} whose first
-\code{d + p} values equal those of \code{x} (the documented anchor
-convention).
+A numeric vector the same length as \code{x}. Its first
+\code{d + p} values equal those of \code{x} — the guaranteed anchor
+convention, which holds for any \code{estar}. Because the
+\code{wh$n_trim} leading residuals held out of the seasonally aligned
+grid are spliced back unmodified, the first \code{wh$n_trim + d + p}
+values in fact equal those of \code{x} as well; that longer run is a
+consequence of the trim (the head is never surgered), not part of the
+anchor guarantee.
 }
 \description{
 Reconstructs a full-length series from (possibly adjusted) innovations by
@@ -31,5 +39,14 @@ held at the original level anchors, so the reconstruction reproduces the
 input exactly at the endpoints regardless of the supplied innovations. When
 \code{estar} is the stored \code{wh$e}, the round trip reproduces \code{x}
 to numerical precision.
+}
+\details{
+In practice the leading run of unchanged values is longer than the \code{d + p}
+anchors: the \code{wh$n_trim} residuals that \code{fs_whiten()} held out to
+align the grid to a whole number of seasonal cycles are spliced back
+unmodified from \code{wh$e_head}, so the first \code{wh$n_trim + d + p} values
+of the reconstruction equal those of \code{x} whatever \code{estar} contains.
+The guaranteed anchor convention is still \code{d + p}; the extra
+\code{wh$n_trim} values are unchanged because that head is never surgered.
 }
 \keyword{internal}
