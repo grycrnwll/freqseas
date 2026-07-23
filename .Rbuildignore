@@ -1,0 +1,8 @@
+^\.github$
+^_pkgdown\.yml$
+^data-raw$
+^\.gitignore$
+^.*\.Rproj$
+^\.Rproj\.user$
+^doc$
+^Meta$

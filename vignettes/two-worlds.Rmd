@@ -1,0 +1,276 @@
+---
+title: "Two worlds: filter versus components identification"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Two worlds: filter versus components identification}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  fig.width = 6.5,
+  fig.height = 4.2
+)
+```
+
+```{r setup}
+library(freqseas)
+```
+
+This is the vignette [`seas_ssi()`](../reference/seas_ssi.html)'s error message
+points to. Try to adjust a series without declaring `phase_rule` and you get a
+teaching error, not a default:
+
+```{r error-demo}
+data(ssi_examples)
+tst <- seas_test(ssi_examples$x[[1]])
+tryCatch(seas_ssi(tst), error = function(e) cat(conditionMessage(e), "\n"))
+```
+
+That error is the whole subject of this vignette. `phase_rule` is not a
+tuning parameter you can cross-validate away -- it is a declaration of *which
+world generated your data*, and the two worlds are observationally
+equivalent at second order. This page explains why, shows a miniature but
+fully verified demonstration of what happens when you get it right and
+wrong, and ends with the diagnostics that inform (without fully resolving)
+the choice.
+
+## Why gain alone doesn't determine a filter
+
+Seasonal adjustment removes a filter: some linear operation
+$H(\omega) = G(\omega) e^{i\theta(\omega)}$ that the observed series carries
+relative to its nonseasonal counterfactual. A periodogram only ever tells you
+about *power*, i.e. about $G(\omega) = |H(\omega)|$, the gain. It says nothing
+about $\theta(\omega)$, the phase.
+
+That is a real gap, not a technicality. Multiply $H$ by any all-pass factor
+(magnitude 1 at every frequency, arbitrary phase) and the gain is unchanged
+while the filter -- and the time-domain sequence it produces -- is not. So
+"estimate the gain from the periodogram, divide it out, leave the phase
+alone" (classic ordinate replacement) is already smuggling in a choice: it
+implicitly assumes the *zero-phase* filter among all the filters sharing that
+gain. That choice is invisible unless you say it out loud, which is exactly
+what `phase_rule` forces.
+
+freqseas resolves the gap with two *named* rules, not an infinite family of
+possibilities:
+
+* **`"minimum"`** -- the unique filter, among all filters sharing a gain,
+  that is both causal and causally invertible. Its phase is pinned to the
+  gain by a Hilbert-transform relation, $\theta(\omega) =
+  -\mathcal{H}\{\log G\}(\omega)$ (the mechanics are in
+  `vignette("the-machinery")`).
+* **`"zero"`** -- $\theta(\omega) \equiv 0$. The classic published-SSI rule:
+  divide the gain, touch nothing else.
+
+## The two worlds
+
+The choice of rule is not arbitrary once you commit to a generative story for
+the seasonality -- it falls out of it.
+
+**Filter world.** Seasonality distorts the series' *own* dynamics: the
+observed series and its nonseasonal counterfactual share one innovation
+stream, related by $x_t = H(B)\, x^{NS}_t$ for a causal filter $H$. Removing
+seasonality is *deconvolution*: you want $H^{-1}$, which requires both the
+gain and the phase. If $H$ itself is minimum-phase (the natural assumption
+for something built from a causal AR-type mechanism), `phase_rule =
+"minimum"` recovers it.
+
+**Components world.** Seasonality is an independent, additive component with
+its own innovations: $x_t = x^{NS}_t + s_t$, $s \perp x^{NS}$. Removing it is
+*signal extraction*, not deconvolution. The optimal (Wiener) filter here is
+$W(\omega) = f_{NS}(\omega) / (f_{NS}(\omega) + f_s(\omega))$, which is
+**real** -- zero phase, by construction. There is no filter phase to
+de-rotate because $x$'s phase at the seasonal frequencies is just $s$'s own
+independent noise. Rotating it (`"minimum"`) doesn't recover anything; it
+actively distorts a component that needed no rotation. `phase_rule = "zero"`
+is correct here, and it is what classic published SSI has always
+implicitly assumed.
+
+**Both stories produce the same second-order spectrum.** Any spectrum
+factors either as $G^2 f_{NS}$ (a filter-world reading) or as
+$f_{NS} + f_s$ (a components-world reading with $f_s = (G^2 - 1) f_{NS}$) --
+the two are spectrally indistinguishable. Under Gaussianity this is
+undecidable *in principle* from the data alone: the two counterfactual paths
+differ, but their distributions do not. That is why `seas_ssi()` refuses to
+default `phase_rule` -- doing so would quietly assert an identification the
+data cannot support. (A non-Gaussian escape hatch exists in principle --
+bicoherence tests can, in theory, distinguish a single nonlinear-in-phase
+stream from a sum of two independent linear streams -- but freqseas does not
+currently implement it; see the architecture notes for the citation trail.)
+
+## When each rule is right
+
+| your belief about the DGP | rule | what "removal" means |
+|---|---|---|
+| seasonality is baked into the series' own filter (shared innovations) | `"minimum"` | deconvolution: divide gain, de-rotate by the implied minimum phase |
+| seasonality is an independent additive component | `"zero"` | Wiener-style shrinkage: divide gain, leave phase alone |
+| seasonality is a fixed, deterministic pattern (not a filter of anything) | *(either -- see below)* | reset the exact-harmonic ordinates to the donor level; no band phase to speak of |
+
+## A verified demonstration
+
+`ssi_examples` bundles one simulated quarterly series per world, **paired
+with its true nonseasonal counterfactual** -- a comparison no real dataset
+permits. Both worlds share the same nonseasonal AR(1) building block ($\phi =
+0.5$) and the same seasonal strength ($\Phi = 0.9$); only the *mechanism*
+connecting them to the observed series differs (see `?ssi_examples` for the
+exact equations).
+
+```{r worlds-setup}
+dm   <- function(z) z - mean(z)
+rmse <- function(a, b) sqrt(mean((dm(a) - dm(b))^2))
+
+run_world <- function(world) {
+  row   <- ssi_examples[ssi_examples$world == world, ]
+  x     <- row$x[[1]]
+  truth <- row$truth[[1]]
+  amin  <- seas_adjust(x, phase_rule = "minimum")
+  azero <- seas_adjust(x, phase_rule = "zero")
+  data.frame(
+    world = world,
+    none    = rmse(as.numeric(x), truth),
+    minimum = rmse(as.numeric(adjusted(amin)),  truth),
+    zero    = rmse(as.numeric(adjusted(azero)), truth)
+  )
+}
+
+result <- rbind(run_world("filter"), run_world("components"))
+result
+```
+
+(RMSE is against the *demeaned* truth throughout this vignette, matching the
+package's own test suite: the shared-innovation filter in the filter world
+has the same gain at frequency zero as at the seasonal frequencies, so no
+adjustment recovers the counterfactual's *level* -- only its shape around
+its own mean. That is not a shortcoming of the adjustment; it is a fact
+about what the filter-world model can identify at all.)
+
+On this single bundled draw: in the **filter** world, `"minimum"` beats
+`"zero"` by a clear margin, and both beat no adjustment. In the
+**components** world, `"zero"` edges out `"minimum"` -- but the margin here
+is thin (`r sprintf("%.4f", result$zero[result$world == "components"])` vs.
+`r sprintf("%.4f", result$minimum[result$world == "components"])`), because
+the gain has to be *estimated* from a single donor pool at $n = 120$, and the
+two rules only differ in a phase correction that the components world's true
+filter doesn't need much of relative to sampling noise. A single draw is not
+a reliable estimate of a win rate. The package's test suite
+(`tests/testthat/test-worlds.R`) reruns this exact comparison 30 times at
+fixed seeds and checks the *robust* claim: `"minimum"` beats `"zero"` in the
+filter world in at least 70% of replications (with a strict mean-RMSE
+ordering), and `"zero"` beats `"minimum"` in the components world in at
+least 60% of replications -- both directions holding with margin, and both
+rules always beating no adjustment. That regression table, not any single
+draw, is the claim to trust.
+
+## The deterministic-line case
+
+A third case sits outside both worlds: a genuinely **fixed**, non-random
+seasonal pattern. It isn't a filter of anything (there's no innovation
+stream driving it), so neither deconvolution nor Wiener shrinkage applies --
+the correct surgery is simply to reset the exact-harmonic ordinates to the
+donor (nonseasonal) level and leave phase alone (`spec$label == "line"`
+routes to this branch regardless of `phase_rule`).
+
+```{r line-default}
+row <- ssi_examples[ssi_examples$world == "line", ]
+x   <- row$x[[1]]
+tst_default <- seas_test(x)
+tst_default$spec[c("label", "shoulder_p", "phase_R")]
+```
+
+This is worth slowing down on, because the *default* call above specifies
+this genuinely-deterministic series as `"band"`, not `"line"` -- and the
+reason is instructive. The line/band shoulder test needs the exact seasonal
+frequencies to land exactly on Fourier grid ordinates of the *whitened*
+series (length `n_e`), not the original series. Here the M0-Whittle whitener
+selects an AR(1) term, which consumes one observation: `n_e = 119`, no
+longer a multiple of the seasonal period (4). The pattern's power, no longer
+sitting exactly on a grid ordinate, leaks into neighboring ordinates -- which
+the shoulder test correctly (if misleadingly) reads as band-like elevation.
+This is precisely the grid-alignment caveat from the design notes: the
+shoulder test requires the seasonal period to divide the *analyzed* length,
+or a taper. Forcing no differencing and no AR term keeps `n_e` at the
+original, grid-aligned 120:
+
+```{r line-corrected}
+tst_fixed <- seas_test(x, ar_max = 0, d = "none")
+tst_fixed$spec[c("label", "shoulder_p", "phase_R")]
+```
+
+With grid alignment restored, the specification test correctly reads
+`"line"`: the shoulder ordinates sit at donor level (p far above `alpha`),
+and the block-phase resultant is close to 1 (a frozen pattern, not a
+re-randomizing one) in both runs above -- block-phase is a *descriptive*
+corroborator and isn't grid-sensitive the way the shoulder test is. In
+practice, if you suspect deterministic seasonality and the default call
+specifies `"band"`, check whether `N` divides `n_e` (printed in
+`summary()`'s whitener section) before trusting the label.
+
+## The comb diagnostic
+
+Even with the guard-based whitener (see `vignette("the-machinery")`), a
+narrow nonseasonal cycle sitting *at* a seasonal frequency can still trip the
+detection test -- it is not seasonality, but it looks like it to a test that
+only asks "is there excess mass at $\Omega_G$?". `seas_test()`'s per-harmonic
+table (`spec$harmonic_table`) and its derived `comb_note` exist to catch
+this: they check whether the excess is elevated at *every* seasonal harmonic
+(a genuine comb) or only a strict subset (consistent with a masquerading
+cycle at just that one frequency).
+
+The two worlds above show the genuine-comb signature -- both harmonics
+elevated, no note:
+
+```{r comb-genuine}
+x_filter <- ssi_examples$x[[which(ssi_examples$world == "filter")]]
+seas_test(x_filter)$spec$harmonic_table
+seas_test(x_filter)$spec$comb_note
+```
+
+Contrast a constructed pure AR(2) cycle at $\pi/2$ (quarterly annual
+frequency), $\rho = 0.95$ -- no seasonality at all, just a narrow nonseasonal
+peak that happens to sit where seasonality would:
+
+```{r comb-masquerade}
+sim_ar2_cycle <- function(rho, ntot, seed) {
+  set.seed(seed)
+  coefs <- c(0, -rho^2)          # peaks at pi/2 with resultant AR(2) roots
+  x <- numeric(ntot); e <- rnorm(ntot)
+  for (t in 3:ntot) x[t] <- sum(coefs * x[t - 1:2]) + e[t]
+  x[(ntot - 119):ntot]
+}
+z   <- sim_ar2_cycle(0.95, 520, seed = 1L)
+tst <- seas_test(z, frequency = 4)
+tst$decision
+tst$spec$label
+tst$spec$harmonic_table
+tst$spec$comb_note
+```
+
+Here the excess is elevated at $\pi/2$ only, and `comb_note` flags exactly
+that -- a signature worth a second look (an AR model fit, a periodogram
+zoomed on that one frequency) before trusting the seasonal-adjustment call.
+
+This is also the honest residual behind the guard-based whitener's design
+(see `vignette("the-machinery")` and `R/whiten.R`'s documentation for the
+full measured matrix): guarding only the harmonic tips (rather than whole
+seasonal bins) cuts the false-alarm rate on a $\rho = 0.85$ nonseasonal cycle
+from about 0.56 (whole-bin exclusion) to about 0.11-0.15, but a *narrower*
+$\rho = 0.95$ cycle -- barely wider than the guard -- still trips detection
+roughly 30-44% of the time at $n = 120$. The comb diagnostic doesn't prevent
+that false alarm; it gives you a second, cheap signal for catching it after
+the fact, precisely in the case just demonstrated.
+
+## Summary
+
+`phase_rule` is not something freqseas can determine from `x` alone, and it
+does not pretend otherwise: `seas_ssi()` requires it, `seas_adjust()`'s
+default is loudly tagged `[declared identification]` in every print and
+summary, and getting it backwards costs real accuracy (as the RMSE table
+above shows for the filter world, and as the 30-rep regression confirms for
+both). Use `"minimum"` when you believe seasonality distorts the series' own
+generating mechanism; use `"zero"` when you believe it is an independent,
+additive nuisance; and check the line/comb diagnostics above before trusting
+either.

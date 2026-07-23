@@ -1,0 +1,271 @@
+---
+title: "Panels and vintages"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Panels and vintages}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  fig.width = 6.5,
+  fig.height = 4.2
+)
+```
+
+```{r setup}
+library(freqseas)
+library(tsibble)
+library(dplyr)
+```
+
+Two things distinguish practical, production seasonal adjustment from the
+single-series demonstrations in the other vignettes: there are usually many
+series at once (a **panel**), and each series keeps growing as new data
+arrive (**vintages**). This vignette covers both, plus the NIPA-style
+constraint that annual totals shouldn't move just because a series was
+adjusted.
+
+## Keyed tsibbles end to end
+
+freqseas maps its whole workflow over the keys of a keyed `tsibble`
+(fable-style): call `seas_test()`/`seas_ssi()`/`seas_adjust()` once on the
+panel, get one fit per key back as a `seas_collection`. Each key is
+adjusted independently -- there is no cross-series pooling (that's future
+work) -- but the bookkeeping (key ordering, re-clothing each key's output
+back into a tsibble, one row per key on print) is handled for you.
+
+```{r panel-build}
+sim_seasonal_q <- function(n, seed, Phi, phi = 0.5, s = 4L, spin = 300L) {
+  set.seed(seed)
+  ntot <- spin + n
+  eps  <- stats::rnorm(ntot)
+  z    <- numeric(ntot)
+  for (t in (s + 2L):ntot) {
+    z[t] <- phi * z[t - 1L] + Phi * z[t - s] - phi * Phi * z[t - s - 1L] + eps[t]
+  }
+  z[(spin + 1L):ntot]
+}
+
+panel <- tsibble::tsibble(
+  region = rep(c("North", "South", "East"), each = 80L),
+  qtr    = rep(tsibble::yearquarter("2000 Q1") + 0:79, 3),
+  value  = c(sim_seasonal_q(80L, seed = 1L, Phi = 0.90),
+             sim_seasonal_q(80L, seed = 2L, Phi = 0.70),
+             sim_seasonal_q(80L, seed = 3L, Phi = 0.85)),
+  key = region, index = qtr
+)
+panel
+```
+
+```{r panel-test}
+tst_coll <- seas_test(panel)
+tst_coll
+```
+
+`seas_ssi()` (or the one-call `seas_adjust()`) maps over the same keys;
+`phase_rule` is required here exactly as it is for a single series:
+
+```{r panel-adjust}
+coll <- seas_ssi(tst_coll, phase_rule = "minimum")
+coll
+```
+
+Every accessor and every generic works the same way, returning a tibble
+keyed by the panel's own key columns instead of a single value:
+
+```{r panel-generics}
+decision(coll)
+glance(coll)
+head(augment(coll))
+```
+
+`adjusted()`/`seasonal()` re-clothe each key's result back into a `tbl_ts`,
+so `adjusted(coll)$adjusted[[1]]` is itself a tsibble, not a bare numeric
+vector:
+
+```{r panel-reclothe}
+adj_tbl <- adjusted(coll)
+class(adj_tbl$adjusted[[1]])
+```
+
+## Decision persistence under concurrent adjustment
+
+A vintage series doesn't arrive all at once -- it grows, one release at a
+time, and each release is a longer prefix of (eventually) the same
+underlying path. The tempting default is to re-run the whole
+detect-specify-identify-operate workflow fresh on every release. That is
+usually the wrong instinct: because the detection test operates at a fixed
+significance level, a series whose seasonal signal sits anywhere near the
+threshold will cross it back and forth as noise accumulates, and if you
+retest every vintage, the *adjustment itself* silently switches on and off
+along with it -- an artificial discontinuity that has nothing to do with new
+information about the series and everything to do with resampling the same
+test at a moving sample size.
+
+This is not a hypothetical. Simulate one long path (a single realization,
+the same way a real series has exactly one realized history) and take
+growing prefixes of it as successive quarterly vintages:
+
+```{r vintage-setup}
+set.seed(19)
+n_max <- 200L; Phi <- 0.35    # a modest seasonal signal, deliberately near
+                               # the detection threshold at these lengths
+e <- stats::rnorm(n_max + 400)
+z <- numeric(n_max + 400)
+for (t in 6:(n_max + 400)) {
+  z[t] <- 0.5 * z[t - 1] + Phi * z[t - 4] - 0.5 * Phi * z[t - 5] + e[t]
+}
+full <- z[401:(n_max + 400)]
+vintage_lens <- seq(80L, 160L, by = 8L)   # 11 successive quarterly releases
+```
+
+Re-testing fresh at every release:
+
+```{r vintage-naive}
+naive_decision <- vapply(vintage_lens, function(L) {
+  seas_test(stats::ts(full[1:L], frequency = 4))$decision
+}, logical(1))
+data.frame(vintage = seq_along(vintage_lens), n = vintage_lens,
+           decision = naive_decision)
+```
+
+The adjustment would turn on and off `r sum(diff(naive_decision) != 0)` times
+across these 11 releases -- and each flip is a real, visible discontinuity:
+the *same* historical quarter is reported seasonally adjusted in one release
+and unadjusted (raw) in the very next, purely because one more quarter of
+noise pushed a p-value across 0.05.
+
+The alternative: re-decide only at scheduled reviews (here, every 5th
+release -- an "annual review" cadence relative to the quarterly vintages),
+and hold that decision fixed for every release in between:
+
+```{r vintage-disciplined}
+review_every <- 5L
+disciplined_decision <- logical(length(vintage_lens))
+current <- NA
+for (i in seq_along(vintage_lens)) {
+  if ((i - 1L) %% review_every == 0L) {
+    current <- seas_test(stats::ts(full[1:vintage_lens[i]], frequency = 4))$decision
+  }
+  disciplined_decision[i] <- current
+}
+data.frame(vintage = seq_along(vintage_lens), n = vintage_lens,
+           decision = disciplined_decision,
+           is_review_point = (seq_along(vintage_lens) - 1L) %% review_every == 0L)
+```
+
+Review-gated testing asks the question 3 times instead of 11, and each
+review reaches a stable answer that then governs every release until the
+next one -- exactly the discipline the design notes call for: *"test/spec
+decisions persist across vintages; re-decide at annual reviews only."* The
+same logic extends past the on/off decision: once a review fixes `M`, the
+line/band specification, and `phase_rule`, pass those explicitly (rather
+than `M = NULL`, letting them float) to every `seas_adjust()` call before the
+next review, so the *character* of the adjustment -- not just whether one
+happens -- stays stable between reviews too.
+
+## `benchmark_totals()`: annual totals are invariant to adjustment
+
+A separate, NIPA-style constraint: seasonal adjustment should redistribute
+activity *within* a year, not change the year's total. `benchmark_totals()`
+proportionally rescales an adjusted series so each complete period's total
+matches the original's -- one multiplicative factor per period, applied
+within that period only.
+
+```{r benchmark}
+data(ssi_examples)
+orig <- ssi_examples$x[[which(ssi_examples$world == "filter")]]
+adj  <- seas_adjust(orig, phase_rule = "minimum")
+matched <- benchmark_totals(adjusted(adj), orig)
+
+N  <- stats::frequency(orig)
+yo <- colSums(matrix(as.numeric(orig),             nrow = N))  # original annual totals
+ya <- colSums(matrix(as.numeric(adjusted(adj)),     nrow = N))  # adjusted, unmatched
+ym <- colSums(matrix(as.numeric(matched),           nrow = N))  # adjusted, benchmarked
+
+max(abs(ya - yo))   # unmatched: adjustment moved the annual totals
+max(abs(ym - yo))   # benchmarked: annual totals restored to ~0
+```
+
+## A `vintagesim` round trip
+
+The `vintagesim` package (a Suggests dependency, used here and in the
+package's own integration tests) simulates a small vintage environment with
+a known latent nonseasonal truth, letting an adjustment be checked against a
+ground truth no real dataset provides. The chunk below only runs if
+`vintagesim` is installed.
+
+```{r vintagesim-check, echo = FALSE}
+have_vintagesim <- requireNamespace("vintagesim", quietly = TRUE)
+```
+
+```{r vintagesim-round-trip, eval = have_vintagesim}
+spec <- vintagesim::new_simulation_spec(
+  J = 4, sample_years = 4, history_years = 6, seed = 101
+)
+env  <- vintagesim::simulate_vintage_environment(spec)
+v    <- vintagesim::vintage_range(spec)
+snap <- vintagesim::get_snapshot(env, v[length(v)])
+
+keys <- c("C01", "C02", "C03")
+tb <- tibble::as_tibble(snap)
+tb <- dplyr::filter(tb, process == "seasonal", series_type == "component",
+                    series_id %in% keys)
+tb <- dplyr::select(tb, series_id, period, value)
+tb <- tsibble::as_tsibble(tb, key = series_id, index = period)
+
+vs_coll <- seas_adjust(tb, phase_rule = "minimum")
+vs_coll
+```
+
+The latent nonseasonal truth lives in `env$truth`, keyed the same way as the
+snapshot; comparing the adjusted series against it (as
+`tests/testthat/test-integration-vintagesim.R` does across many seeds) is
+how the package's own tier-4 acceptance test confirms that adjustment beats
+no adjustment against a ground truth outside of a purely synthetic
+`ssi_examples` draw. One component here, compared demeaned (the shared-
+innovation filter's frequency-zero gain means levels aren't recoverable --
+the same fact `vignette("two-worlds")` establishes):
+
+```{r vintagesim-compare, eval = have_vintagesim}
+nonseasonal_truth <- function(env, sid) {
+  df <- tibble::as_tibble(env$truth)
+  df <- dplyr::filter(df, process == "nonseasonal", series_type == "component",
+                      series_id == sid)
+  dplyr::arrange(df, period)
+}
+
+sid <- "C01"
+truth_df <- nonseasonal_truth(env, sid)
+obs_df   <- dplyr::arrange(dplyr::filter(tb, series_id == sid), period)
+common   <- intersect(truth_df$period, obs_df$period)
+
+xv  <- obs_df$value[match(common, obs_df$period)]
+txv <- truth_df$value[match(common, truth_df$period)]
+
+adj_tbl_vs <- adjusted(vs_coll)
+adj_ts_vs  <- adj_tbl_vs$adjusted[[which(adj_tbl_vs$series_id == sid)]]
+av <- as.numeric(adj_ts_vs[[tsibble::measured_vars(adj_ts_vs)]])
+
+dm <- function(z) z - mean(z)
+c(none = sqrt(mean((dm(xv) - dm(txv))^2)),
+  adj  = sqrt(mean((dm(av) - dm(txv))^2)))
+```
+
+```{r vintagesim-missing, eval = !have_vintagesim, echo = FALSE, results = "asis"}
+cat("_`vintagesim` is not installed in the environment that built this vignette;",
+    "the round-trip chunks above were skipped._\n")
+```
+
+## Where next
+
+* `vignette("getting-started")` -- the same accessors and generics on a
+  single series, without the panel/vintage layer.
+* `vignette("two-worlds")` -- why `phase_rule` has to be declared once
+  (ideally at the same review cadence as the rest of the decision).
+* `vignette("the-machinery")` -- what actually changes inside the adjustment
+  when `M`, `d`, or the AR order drift between vintages.

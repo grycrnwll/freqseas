@@ -1,0 +1,41 @@
+Package: freqseas
+Title: Frequency-Domain Seasonality Testing and Adjustment
+Version: 0.0.0.9000
+Authors@R:
+    person("Package", "Author", email = "grycrnwll@gmail.com",
+           role = c("aut", "cre"))
+Description: Frequency-domain tools for detecting, specifying, and adjusting
+    seasonality in time series, organized by the workflow's epistemic
+    hierarchy. An extreme-value test detects excess mass at seasonal
+    frequencies against a white-noise null (detect); shoulder and block-phase
+    tests distinguish line from band spectra (specify); a declared phase rule
+    fixes the filter-versus-components identification (identify); and
+    seasonal-subseries-inspired gain surgery with the implied minimum-phase or
+    zero-phase correction and whitener recoloring performs the adjustment
+    (operate). Inputs may be 'ts', numeric with a stated frequency, or
+    'tsibble' objects, and keyed series are mapped over independently.
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Depends:
+    R (>= 2.10)
+Imports:
+    dplyr,
+    generics,
+    grDevices,
+    graphics,
+    rlang,
+    stats,
+    tibble,
+    tsibble,
+    utils
+Suggests:
+    ggplot2,
+    knitr,
+    rmarkdown,
+    testthat (>= 3.0.0),
+    vintagesim
+Config/testthat/edition: 3
+VignetteBuilder: knitr
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2

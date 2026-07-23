@@ -1,0 +1,70 @@
+# Workflow derived from https://github.com/r-lib/actions/tree/v2/examples
+# Standard multi-platform R CMD check for freqseas.
+#
+# vintagesim is a Suggests dependency that is NOT published on CRAN, so it is
+# deliberately absent on CI: dependency resolution installs only the hard deps
+# plus the CRAN-available Suggests (vintagesim is omitted), and the check step
+# sets _R_CHECK_FORCE_SUGGESTS_=false so a missing Suggests is not an error.
+# Every vintagesim-dependent test guards itself with
+# testthat::skip_if_not_installed("vintagesim"), and the vintagesim vignette
+# section is wrapped in requireNamespace(), so both simply skip here.
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+name: R-CMD-check
+
+permissions: read-all
+
+jobs:
+  R-CMD-check:
+    runs-on: ${{ matrix.config.os }}
+
+    name: ${{ matrix.config.os }} (${{ matrix.config.r }})
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - {os: macos-latest,   r: 'release'}
+          - {os: windows-latest, r: 'release'}
+          - {os: ubuntu-latest,  r: 'devel', http-user-agent: 'release'}
+          - {os: ubuntu-latest,  r: 'release'}
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      R_KEEP_PKG_SOURCE: yes
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: ${{ matrix.config.r }}
+          http-user-agent: ${{ matrix.config.http-user-agent }}
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          # vintagesim (a non-CRAN Suggests) is intentionally not installed;
+          # install the hard deps plus the CRAN-available Suggests explicitly.
+          dependencies: '"hard"'
+          extra-packages: |
+            any::rcmdcheck
+            any::testthat
+            any::knitr
+            any::rmarkdown
+            any::ggplot2
+          needs: check
+
+      - uses: r-lib/actions/check-r-package@v2
+        env:
+          # vintagesim is not on CRAN and is absent here; do not require it.
+          _R_CHECK_FORCE_SUGGESTS_: false
+        with:
+          upload-snapshots: true
+          build_args: 'c("--no-manual","--compact-vignettes=gs+qpdf")'

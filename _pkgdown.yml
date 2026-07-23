@@ -1,0 +1,100 @@
+url: ~  # fill in once the pkgdown site has a home (e.g. https://OWNER.github.io/freqseas/)
+
+template:
+  bootstrap: 5
+
+development:
+  mode: auto
+
+# Reference is grouped by workflow stage (detect -> specify -> identify ->
+# operate), matching the vignettes' own organizing principle, not by file or
+# object class. Internal helpers (fs_whiten, fs_donor_pool, fs_gain,
+# fs_surgery, fs_recolor -- documented with @keywords internal for
+# developer/paper-reader reference, never @export'd) are deliberately left
+# out of every section below: they are implementation, not API, and
+# vignette("the-machinery") walks their behavior through the public object
+# fields instead. pkgdown will still build a page for each (via man/), just
+# outside this curated index.
+reference:
+- title: Test
+  desc: >
+    Stage 0 (whiten) + Stage A (detect) + Stage B (specify): is the series
+    seasonal, and is the seasonality a line or a band?
+  contents:
+  - seas_test
+  - seas_test.tbl_ts
+
+- title: Adjust
+  desc: >
+    Stage C: given a declared phase_rule (the identification choice --
+    see vignette("two-worlds")), remove the estimated seasonal filter and
+    recolor. benchmark_totals() enforces the separate NIPA-style constraint
+    that annual totals are invariant to adjustment.
+  contents:
+  - seas_adjust
+  - seas_adjust.tbl_ts
+  - seas_ssi
+  - seas_ssi.seas_collection
+  - benchmark_totals
+
+- title: Inspect
+  desc: >
+    Accessors, print/summary/plot/autoplot methods, and the broom-style
+    tidy()/glance()/augment() generics, for single-series (seas_test,
+    seas_sa) and keyed-panel (seas_collection) results alike.
+  contents:
+  - adjusted
+  - seasonal
+  - whitener
+  - decision
+  - print.seas_test
+  - print.seas_sa
+  - print.seas_collection
+  - summary.seas_test
+  - summary.seas_sa
+  - summary.seas_collection
+  - print.summary.seas_test
+  - print.summary.seas_sa
+  - print.summary.seas_collection
+  - plot.seas_test
+  - plot.seas_sa
+  - plot.seas_collection
+  - autoplot.seas_test
+  - autoplot.seas_sa
+  - autoplot.seas_collection
+  - tidy.seas_test
+  - tidy.seas_sa
+  - tidy.seas_collection
+  - glance.seas_test
+  - glance.seas_sa
+  - glance.seas_collection
+  - augment.seas_sa
+  - augment.seas_collection
+
+- title: Tune
+  desc: >
+    Standalone utilities behind the smart defaults: the bin-count suggester
+    and the cepstral minimum-phase reconstruction (also generically useful
+    outside freqseas).
+  contents:
+  - suggest_M
+  - min_phase
+
+- title: Data
+  desc: >
+    Bundled known-truth examples: simulated series paired with their true
+    nonseasonal counterfactual, one per identification world.
+  contents:
+  - ssi_examples
+
+# Articles listed in reading order: one-call workflow first, then the
+# identification story the phase_rule error message points to, then the
+# mechanics, then panels/vintages/production practice.
+articles:
+- title: Vignettes
+  navbar: ~
+  contents:
+  - getting-started
+  - two-worlds
+  - the-machinery
+  - panels-and-vintages

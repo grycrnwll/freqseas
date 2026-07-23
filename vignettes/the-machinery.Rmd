@@ -1,0 +1,273 @@
+---
+title: "The machinery: bins, donors, whitening, and surgery"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{The machinery: bins, donors, whitening, and surgery}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  fig.width = 6.5,
+  fig.height = 4.2
+)
+```
+
+```{r setup}
+library(freqseas)
+```
+
+`vignette("getting-started")` shows *what* to call and `vignette("two-worlds")`
+explains *which identification* to declare. This vignette is for readers who
+want to see *how* each stage works -- the bin geometry, the detection
+statistic, the whitener, the phase reconstruction, and the surgery itself --
+matched to the paper's notation. The internal functions that implement each
+stage (`fs_whiten()`, `fs_donor_pool()`, `fs_gain()`, `fs_surgery()`, and the
+bin/index-set builders) are not exported -- they are implementation, not
+API -- so everything below is shown through the fields a `seas_test`/`seas_sa`
+object actually returns, which *are* part of the documented contract.
+
+One worked example runs through the whole vignette: a quarterly
+AR(2)$\times$SAR(1)-type series, $n = 120$, seasonal coefficient $\Phi = 0.8$
+(the same generator used in most of the package's own `@examples`):
+
+```{r worked-example}
+set.seed(1)
+n <- 120L; Phi <- 0.8
+e <- stats::rnorm(n + 400)
+z <- numeric(n + 400)
+for (t in 6:(n + 400)) {
+  z[t] <- 0.5 * z[t - 1] + Phi * z[t - 4] - 0.5 * Phi * z[t - 5] + e[t]
+}
+x <- stats::ts(z[401:(n + 400)], frequency = 4)
+tst <- seas_test(x)
+```
+
+## Bins: the seasonal/nonseasonal partition
+
+The first geometric object in the pipeline is a partition of the positive
+frequency axis $(0, \pi]$ into $M$ equal-width bins. A bin is **seasonal**
+($M_1$) if it contains one of the seasonal frequencies
+$\Omega_G = \{2\pi k / (PN) : k = 1, \dots, \lfloor PN/2 \rfloor\}$ (for
+quarterly data with the fundamental multiplier $P = 1$, that's just $\pi/2$
+and $\pi$); every other bin is **nonseasonal** ($M_0$). `tst$partition`
+carries the realized partition:
+
+```{r partition}
+tst$partition$breaks              # bin edges on (0, pi]
+tst$partition$M1                  # seasonal bin indices
+tst$partition$M0                  # nonseasonal bin indices
+```
+
+That bin classification is then mapped onto actual Fourier-ordinate indices
+of the whitened series (`J1`/`J0`, `N1`/`N0` seasonal/nonseasonal ordinate
+counts, `H` the exact-harmonic ordinates, `S` the shoulder ordinates
+`J1 \ H`):
+
+```{r index-sets}
+tst$partition$N1                  # seasonal-bin ordinate count
+tst$partition$N0                  # nonseasonal-bin (donor) ordinate count
+```
+
+## Donors and the EVT detection test
+
+**Detection** asks a single question: is there more power at the seasonal
+ordinates ($J_1$) than a white-noise process would produce, relative to the
+nonseasonal ordinates ($J_0$) as a reference? The statistic is a max-contrast,
+$\Delta = \max_{J_1} I - \max_{J_0} I$, on the *standardized* periodogram of
+the whitened residuals. Under the white null this statistic is (to a good
+approximation) logistic with location $\hat\tau \log(N_1/N_0)$ and scale
+$\hat\tau$ -- an extreme-value argument, not a chi-squared one, because it's a
+contrast of *maxima*, and it is what gives the test its name (EVT).
+
+```{r evt}
+tst$evt
+```
+
+The **donor pool** is a separate, smaller idea: which nonseasonal ordinates
+serve as the "clean" reference level when it comes time to estimate *gain*
+(Stage C, below). It's the $J_0$ ordinates at or below the
+`donor_quantile` (default 0.9) of the $J_0$ periodogram distribution --
+excluding any nonseasonal ordinate that happens to carry unusually high
+power (leakage from a nearby peak, or any other spectral feature) from
+inflating the reference level:
+
+```{r donors}
+length(tst$donor_pool)            # size of the donor pool
+tst$donor_level                   # reference (donor) periodogram level
+```
+
+## `suggest_M()`: choosing the bin count
+
+$M$ trades off two things: too few bins and a seasonal bin swallows too much
+of the nonseasonal spectrum next to it (contaminating the donor reference);
+too many bins and each one holds too few Fourier ordinates to estimate
+anything from. `suggest_M()` picks $M$ so that every seasonal frequency gets
+its own bin (no merging), no seasonal frequency sits on a bin boundary, and
+the seasonal-bin share $K_M/M$ lands near a target (default 0.25):
+
+```{r suggest-m}
+suggest_M(P = 1, N = 4, n_obs = 120)
+```
+
+freqseas's binning is **offset-free** (bins are the fixed partition
+$((m-1)\pi/M,\, m\pi/M]$); a nonzero-offset partition can occasionally reach a
+smaller $M$, but is not realizable by the package's binning:
+
+```{r suggest-m-offset}
+suggest_M(P = 1, N = 4, n_obs = 120, offset_grid = c(0, 0.5))
+```
+
+`seas_test()` uses this offset-free suggester by default (`M = NULL`), and
+always reports how `M` was chosen:
+
+```{r m-selection}
+tst$M_selection
+```
+
+## The M0-Whittle whitener
+
+Before any of the above runs, the series is **whitened**: a small AR filter
+is fit and subtracted so that what's left (`e`, the whitened residuals) is as
+close to white noise as a modest-order AR model can make it, without ever
+being allowed to explain away the seasonality itself. The whitener's
+blindness to seasonality is a design guarantee, not an accident of AR order:
+at quarterly frequency an AR(2) with a negative lag-2 coefficient already
+peaks at $\pi/2$, so simply *capping* the order at, say, 3 is not protection
+-- what protects the fit is that its likelihood only ever *looks at*
+nonseasonal ordinates. The default geometry (`exclusion = "guard"`) excludes
+only the ordinates within a small guard band (default 3 Fourier steps) of
+each exact seasonal harmonic, leaving the broad shoulders of a genuine
+nonseasonal peak at a seasonal frequency visible to the fit -- which is what
+lets the whitener explain such a peak (curing false alarms) while staying
+blind to a concentrated seasonal comb.
+
+The model fit to those included ordinates is not the naive infinite-sample AR
+spectral density, but the **de-biased expected periodogram** of Sykulski,
+Olhede, Guillaumin, Lilly & Early (2019, *Biometrika*) -- the finite-$n$
+expectation $E[I(\omega_j)]$ of the periodogram under the candidate AR model,
+computed exactly at the Fourier frequencies from the (Bartlett-weighted)
+theoretical autocovariance. Fitting to this finite-sample expectation, rather
+than to the $n \to \infty$ spectral density, removes the systematic
+under-extrapolation of a peak's height that a bin-restricted fit otherwise
+shows.
+
+Order selection is a de-biased-Whittle BIC search over `p = 0..ar_max`
+(default cap 3):
+
+```{r whitener}
+tst$whitener[c("d", "d_reason", "p", "ar", "sigma2")]
+tst$whitener$bic_path
+tst$whitener[c("exclusion", "guard")]
+```
+
+The guard geometry's default (`guard = 3`) was chosen by a fixed-seed
+experiment contrasting it against whole-bin exclusion and a narrower guard
+(see `?fs_whiten`'s Details for the full measured matrix); the key numbers,
+at $n = 120$ quarterly: guard(3) cuts the false-alarm rate on a genuine
+nonseasonal AR(2) cycle at $\pi/2$ ($\rho = 0.85$) from about 0.56 (whole-bin
+exclusion) to about 0.11-0.15, while a comb-shaped seasonal signal's
+bin-power ratio after whitening stays around 19 -- meaning a real comb
+survives whitening essentially intact, which is the property the design
+exists to guarantee. `vignette("two-worlds")` demonstrates the residual hard
+case (a narrower cycle that still occasionally trips detection) and the
+diagnostic (`comb_note`) that flags it after the fact.
+
+## `min_phase()`: phase from gain alone
+
+Once a seasonal band is detected, Stage C needs a *filter* to remove, not
+just a gain -- and (per `vignette("two-worlds")`) a gain alone doesn't pin
+down a filter's phase. `min_phase()` computes the phase of the unique
+causal, causally-invertible filter sharing a given gain, via the discrete
+Hilbert-transform relation between log-gain and phase, implemented as a
+cepstral fold (Oppenheim & Schafer): take the real cepstrum of the log-gain,
+double its causal (positive-lag) half onto itself, zero out the anticausal
+half, and transform back -- the fold is exactly where causality enters.
+
+A closed-form case makes this concrete: the seasonal-AR-type filter
+$H(\omega) = 1/(1 - \Phi e^{-4i\omega})$ has gain
+$G(\omega) = |H(\omega)|$ and a known phase, a sawtooth that rotates through
+each seasonal harmonic:
+
+```{r min-phase}
+Phi <- 0.9; n <- 80L
+w  <- 2 * pi * (0:(n - 1)) / n
+G  <- 1 / sqrt(1 + Phi^2 - 2 * Phi * cos(4 * w))
+theta_true <- -atan2(Phi * sin(4 * w), 1 - Phi * cos(4 * w))
+theta_hat  <- min_phase(log(G))
+max(abs(theta_hat - theta_true))
+```
+
+At only $n = 80$ knots for a fairly peaked gain ($\Phi = 0.9$), linear
+interpolation to the fine internal grid under-resolves the peak's curvature,
+and the error saturates around 0.02 rad regardless of how fine that internal
+grid is set -- a resolution-boundary artifact of the $n = 80$ sampling, not
+of the cepstral fold itself (which is exact to under $10^{-10}$ given an
+accurate input; see `tests/testthat/test-minphase.R`). It shrinks as $n$
+grows, and is already an order of magnitude below the phase errors that
+matter for adjustment accuracy (`vignette("two-worlds")`'s RMSE comparisons).
+
+## The surgery
+
+Stage C removes the estimated filter from the DFT of the whitened residuals.
+Two specifications:
+
+* **band** -- every ordinate is divided by the estimated gain and de-rotated
+  by the phase implied by the declared `phase_rule` (`min_phase(log(Ghat))`
+  for `"minimum"`, zero for `"zero"`).
+* **line** -- only the exact-harmonic ordinates are touched: their magnitude
+  is reset to the donor level and their phase is left alone (a deterministic
+  line has no filter phase to de-rotate).
+
+Both branches enforce the same three guards: the DC ordinate is left
+byte-for-byte identical to the input, the Nyquist ordinate (if present) is
+forced exactly real, and Hermitian symmetry is rebuilt exactly (rather than
+trusted to floating-point arithmetic) for every ordinate the branch touched.
+These guards -- plus a taper/pad discipline against circular wraparound at
+the sample edges -- are what keep the surgery numerically well-behaved at the
+boundaries, which matters most exactly where vintage revisions matter most:
+the most recent observations.
+
+```{r surgery}
+adj <- seas_ssi(tst, phase_rule = "minimum")
+range(adj$Ghat)                   # gain applied (>= 1; 1 == untouched)
+range(adj$theta)                  # phase applied (radians)
+```
+
+The gain itself is never estimated ordinate-by-ordinate raw: it's floored at
+1 (the surgery never *amplifies* an ordinate relative to the donor level),
+then lightly smoothed in log space across the seasonal bins so the
+correction doesn't chase single-ordinate periodogram noise, and tapers
+smoothly back to the donor level (gain 1) just outside the seasonal bins
+rather than presenting a hard cliff at the bin edge.
+
+## Recoloring
+
+The adjusted innovations are not simply substituted for the original ones
+and forecast forward from stale fitted values (`fitted + e*`) -- that
+reintroduces exactly the seasonality Stage C just removed, through the AR
+model's own memory of the un-adjusted history (this was the root cause
+diagnosed in the design notes' original comparison run). Instead, recoloring
+runs the *same* AR recursion that produced the whitened residuals, but
+**forward through the adjusted innovations**, and undoes any differencing by
+anchoring at the original series' own initial level:
+
+```{r recolor}
+max(abs(as.numeric(adj$adjusted) + as.numeric(adj$seasonal) - as.numeric(x)))
+head(as.numeric(adj$adjusted), 3)   # first p + d values: held at x's own level
+head(as.numeric(x), 3)
+```
+
+Seasonality can only re-enter the reconstruction through the innovations
+themselves -- which is exactly what Stage C cleaned.
+
+## Where next
+
+* `vignette("two-worlds")` -- why `phase_rule` has to be declared, and what
+  it costs to declare it wrong.
+* `vignette("panels-and-vintages")` -- the same machinery mapped over keyed
+  panels, and why test/spec decisions should persist across vintages rather
+  than being re-run on every release.

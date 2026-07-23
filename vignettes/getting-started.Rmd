@@ -1,0 +1,195 @@
+---
+title: "Getting started with freqseas"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with freqseas}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  fig.width = 6.5,
+  fig.height = 4.2
+)
+```
+
+freqseas organizes seasonal adjustment around the workflow's own epistemic
+hierarchy, rather than treating "adjust the series" as one undifferentiated
+step:
+
+* **detect** -- is there excess mass at seasonal frequencies at all, against a
+  white-noise null? (testable)
+* **specify** -- is the seasonality a line (a fixed, deterministic pattern) or
+  a band (a stochastic process concentrated near the seasonal frequencies)?
+  (testable)
+* **identify** -- does the seasonality distort the series' own dynamics
+  (the "filter" world) or sit on top of it as an independent, additive
+  component (the "components" world)? This is a modelling commitment, not
+  something the data can decide on their own -- see `vignette("two-worlds")`.
+* **operate** -- given the above, remove the seasonal filter (gain surgery)
+  and recolor the result back onto the original series.
+
+This vignette walks the one-call path, then the equivalent two-stage path,
+on `UKgas`, a small quarterly series built into base R (`datasets::UKgas`,
+UK gas consumption, 1960 Q1 -- 1986 Q4). No extra data downloads, no random
+seeds to worry about -- everything below is real, executed output.
+
+```{r setup}
+library(freqseas)
+UKgas
+```
+
+## The one-call path
+
+`seas_adjust()` runs the whole workflow -- test, specify, identify, operate --
+in one call. `phase_rule` defaults to `"minimum"` at this wrapper layer (the
+filter-world / deconvolution rule); see `vignette("two-worlds")` for why that
+default exists and when `"zero"` is the right choice instead.
+
+```{r one-call}
+fit <- seas_adjust(UKgas)
+fit
+```
+
+The printed summary already answers the workflow's first three questions for
+this series: `UKgas` **is** seasonal (detection p far below 0.05), the
+seasonality is a **band** (not a fixed line), and the declared identification
+is tagged `[declared identification]` -- a reminder that "minimum" is a
+choice, not a fact the data proved. The `comb:` line, when present, is a
+diagnostic explained in `vignette("two-worlds")`; it flags when the excess
+seasonal-frequency mass is concentrated at only *some* of the harmonics
+(here, the annual one) rather than the full comb, which can also happen for
+genuine, non-comb-shaped seasonality and is worth a second look rather than
+an alarm.
+
+`summary()` gives the full record behind that compact print: the detection
+statistic and ordinate counts, the whitener's differencing/AR decision and
+its BIC path, the bin-count selection, and the gain surgery actually applied.
+
+```{r summary}
+summary(fit)
+```
+
+### Plots
+
+`plot()` on a `seas_sa` defaults to the original-vs-adjusted series with the
+removed seasonal component beneath it; `type = "periodogram"` shows the
+standardized periodogram before and after adjustment side by side, so you can
+see the seasonal-bin ordinates (blue) collapse toward the donor (nonseasonal)
+level.
+
+```{r plot-series}
+plot(fit)
+```
+
+```{r plot-periodogram}
+plot(fit, type = "periodogram")
+```
+
+### Accessors
+
+Four small accessor generics pull the pieces back out without reaching into
+list internals: `adjusted()`, `seasonal()`, `whitener()`, `decision()`.
+
+```{r accessors}
+head(adjusted(fit))
+head(seasonal(fit))
+decision(fit)
+str(whitener(fit)[c("d", "d_reason", "p", "ar")])
+```
+
+### broom generics
+
+`tidy()`, `glance()`, and `augment()` (from the `generics` package) give
+tibble-shaped views for anyone used to the broom ecosystem: `glance()` is a
+one-row model summary, `augment()` is observation-level (original, adjusted,
+seasonal), and `tidy()` renders the per-harmonic diagnostic table when one is
+available.
+
+```{r broom}
+glance(fit)
+head(augment(fit))
+```
+
+## The two-stage path
+
+`seas_adjust()` is exactly `seas_ssi(seas_test(x, ...), phase_rule = ...)` --
+one code path, not two implementations that could drift apart. The two-stage
+form is what you reach for when you want to inspect the test (or reuse it
+under more than one `phase_rule`) before committing to an adjustment.
+
+```{r two-stage}
+tst <- seas_test(UKgas)
+tst
+```
+
+```{r two-stage-plot}
+plot(tst)
+```
+
+`seas_ssi()` takes that test and a *required* `phase_rule` -- there is
+deliberately no default here, only at the `seas_adjust()` wrapper layer (see
+`vignette("two-worlds")` for why omitting it raises a teaching error instead
+of silently picking one):
+
+```{r two-stage-ssi}
+adj <- seas_ssi(tst, phase_rule = "minimum")
+identical(adjusted(adj), adjusted(fit))
+```
+
+## A keyed-tsibble teaser
+
+freqseas maps the whole workflow over the keys of a keyed `tsibble`
+(fable-style): one fit per key, returned as a `seas_collection`. The example
+below is a small **synthetic** two-key panel built purely to show the shape
+of the API -- the full treatment (decision persistence across vintages, a
+`vintagesim` round trip, `benchmark_totals()`) is in
+`vignette("panels-and-vintages")`.
+
+```{r panel-teaser}
+library(tsibble)
+
+sim_seasonal_q <- function(n, seed, Phi, phi = 0.5, s = 4L, spin = 300L) {
+  set.seed(seed)
+  ntot <- spin + n
+  eps  <- stats::rnorm(ntot)
+  z    <- numeric(ntot)
+  for (t in (s + 2L):ntot) {
+    z[t] <- phi * z[t - 1L] + Phi * z[t - s] - phi * Phi * z[t - s - 1L] + eps[t]
+  }
+  z[(spin + 1L):ntot]
+}
+
+panel <- tsibble::tsibble(
+  region = rep(c("North", "South"), each = 80L),
+  qtr    = rep(tsibble::yearquarter("2000 Q1") + 0:79, 2),
+  value  = c(sim_seasonal_q(80L, seed = 1L, Phi = 0.9),
+             sim_seasonal_q(80L, seed = 2L, Phi = 0.7)),
+  key = region, index = qtr
+)
+
+coll <- seas_adjust(panel, phase_rule = "minimum")
+coll
+```
+
+`adjusted()`/`seasonal()`/`whitener()`/`decision()` all have `seas_collection`
+methods too, returning a tibble keyed the same way:
+
+```{r panel-accessors}
+decision(coll)
+```
+
+## Where next
+
+* `vignette("two-worlds")` -- the identification story: why `phase_rule`
+  can't be chosen by the data alone, a miniature verified demonstration, and
+  the comb diagnostic seen above.
+* `vignette("the-machinery")` -- bins, donors, EVT, the M0-Whittle whitener,
+  `suggest_M()`, and `min_phase()` for readers who want the mechanics behind
+  each stage.
+* `vignette("panels-and-vintages")` -- keyed tsibbles end to end, decision
+  persistence under concurrent adjustment, a `vintagesim` round trip, and
+  `benchmark_totals()`.
